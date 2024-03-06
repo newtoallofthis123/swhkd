@@ -13,7 +13,7 @@ use std::{
     error::Error,
     fs,
     fs::Permissions,
-    io::prelude::*,
+    io::Write,
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
     process::{exit, id},
@@ -60,6 +60,46 @@ async fn main() -> Result<(), Box<dyn Error>> {
     log::trace!("Environment Aquired");
 
     let invoking_uid = env.pkexec_id;
+
+    // Small utility to invoke swhks if it is not running
+    let pid_file_path = format!("{}/swhks.pid", env.xdg_runtime_socket.to_string_lossy());
+    let server_pid = std::fs::read_to_string(&pid_file_path).unwrap_or_default();
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let mut is_server_running = false;
+
+    sys.processes().iter().for_each(|(pid, _)| {
+        if pid.to_string() == server_pid {
+            log::info!("swhks is running with pid: {}", server_pid);
+            is_server_running = true;
+        }
+    });
+
+    if !is_server_running {
+        log::info!("swhks is not running, starting it...");
+        let current_exe = env::current_exe().unwrap();
+
+        // This is a hack to replace the current binary name with swhks
+        // However, this would severely break if the binary name is not swhks or it is not in the same directory
+        // However, in most cases with the current installation methods, this should work
+        let server_exe =
+            current_exe.to_string_lossy().to_string().strip_suffix("swhkd").unwrap().to_string()
+                + "swhks";
+
+        // It explicitly uses std instead of tokio, because the version
+        // using tokio spawns a non blocking process, which causes the
+        // process to start properly
+        match std::process::Command::new(server_exe).arg("-d").spawn().is_ok() {
+            true => {
+                log::info!("swhks started successfully");
+            }
+            false => {
+                log::error!("Failed to start swhks");
+                exit(1);
+            }
+        }
+    }
 
     setup_swhkd(invoking_uid, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
 
@@ -514,7 +554,7 @@ pub fn setup_swhkd(invoking_uid: u32, runtime_path: String) {
     }
 
     // Get the PID file path for instance tracking.
-    let pidfile: String = format!("{}swhkd_{}.pid", runtime_path, invoking_uid);
+    let pidfile: String = format!("{}/swhkd_{}.pid", runtime_path, invoking_uid);
     if Path::new(&pidfile).exists() {
         log::trace!("Reading {} file and checking for running instances.", pidfile);
         let swhkd_pid = match fs::read_to_string(&pidfile) {
