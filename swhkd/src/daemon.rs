@@ -12,16 +12,16 @@ use std::{
     env,
     error::Error,
     fs,
-    fs::Permissions,
+    fs::{OpenOptions, Permissions},
     io::prelude::*,
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::{exit, id},
+    process::{exit, id, Stdio},
 };
 use sysinfo::{ProcessExt, System, SystemExt};
 use tokio::select;
-use tokio::time::Duration;
 use tokio::time::{sleep, Instant};
+use tokio::{sync::mpsc, time::Duration};
 use tokio_stream::{StreamExt, StreamMap};
 use tokio_udev::{AsyncMonitorSocket, EventType, MonitorBuilder};
 
@@ -56,12 +56,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     log::trace!("Logger initialized.");
 
-    let env = environ::Env::construct();
-    log::trace!("Environment Aquired");
+    let invoking_uid = nix::unistd::Uid::current().as_raw();
 
-    let invoking_uid = env.pkexec_id;
+    let load_env = || {
+        perms::drop_privileges(invoking_uid);
+        let temp_env = environ::Env::construct();
+        log::trace!("Environment Aquired");
+        perms::raise_privileges();
+        temp_env
+    };
+
+    let env = load_env();
 
     setup_swhkd(invoking_uid, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
+
+    let (sender, mut receiver) = mpsc::channel::<String>(20);
+
+    tokio::spawn(async move {
+        perms::drop_privileges(invoking_uid);
+        loop {
+            match receiver.try_recv() {
+                Ok(cmd) => {
+                    log::info!("Received command: {}", cmd);
+                    run_system_command(&cmd, Path::new("/tmp/swhkd.log"));
+                }
+                Err(_) => {
+                    log::trace!("No command received.");
+                }
+            }
+        }
+    });
 
     let load_config = || {
         // Drop privileges to the invoking user.
@@ -128,9 +152,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             if commands_to_send.ends_with(" &&") {
                 commands_to_send = commands_to_send.strip_suffix(" &&").unwrap().to_string();
             }
-            if let Err(e) = socket_write(&commands_to_send, $socket_path.to_path_buf()) {
-                log::error!("Failed to send command to swhks through IPC.");
-                log::error!("Please make sure that swhks is running.");
+            if let Err(e) = sender.send(commands_to_send).await {
+                log::error!("Error sending data to execution thread");
                 log::error!("Err: {:#?}", e)
             }
         };
@@ -224,7 +247,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::pin!(hotkey_repeat_timer);
 
     // The socket we're sending the commands to.
-    let socket_file_path = env.fetch_xdg_runtime_socket_path();
+    let _socket_file_path = env.fetch_xdg_runtime_socket_path();
     loop {
         select! {
             _ = &mut hotkey_repeat_timer, if &last_hotkey.is_some() => {
@@ -425,7 +448,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn socket_write(command: &str, socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
+fn _socket_write(command: &str, socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
     let mut stream = UnixStream::connect(socket_path)?;
     stream.write_all(command.as_bytes())?;
     Ok(())
@@ -443,8 +466,7 @@ pub fn check_input_group() -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-        log::error!("Consider using `pkexec swhkd ...`");
-        exit(1);
+        Err("Invoking user is not in the input group!")?
     } else {
         log::warn!("Running swhkd as root!");
         Ok(())
@@ -514,7 +536,7 @@ pub fn setup_swhkd(invoking_uid: u32, runtime_path: String) {
     }
 
     // Get the PID file path for instance tracking.
-    let pidfile: String = format!("{}swhkd_{}.pid", runtime_path, invoking_uid);
+    let pidfile: String = format!("{}/swhkd_{}.pid", runtime_path, invoking_uid);
     if Path::new(&pidfile).exists() {
         log::trace!("Reading {} file and checking for running instances.", pidfile);
         let swhkd_pid = match fs::read_to_string(&pidfile) {
@@ -548,8 +570,35 @@ pub fn setup_swhkd(invoking_uid: u32, runtime_path: String) {
         }
     }
 
-    // Check if the user is in input group.
     if check_input_group().is_err() {
+        log::error!("Sudo permissions are required to run swhkd!");
         exit(1);
+    }
+}
+
+/// Run a system command and log the output to a file.
+fn run_system_command(command: &str, log_path: &Path) {
+    if let Err(e) = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .stdin(Stdio::null())
+        .stdout(match OpenOptions::new().append(true).create(true).open(log_path) {
+            Ok(file) => file,
+            Err(e) => {
+                _ = std::process::Command::new("notify-send").arg(format!("ERROR {}", e)).spawn();
+                exit(1);
+            }
+        })
+        .stderr(match OpenOptions::new().append(true).create(true).open(log_path) {
+            Ok(file) => file,
+            Err(e) => {
+                _ = std::process::Command::new("notify-send").arg(format!("ERROR {}", e)).spawn();
+                exit(1);
+            }
+        })
+        .spawn()
+    {
+        log::error!("Failed to execute {}", command);
+        log::error!("Error: {}", e);
     }
 }
