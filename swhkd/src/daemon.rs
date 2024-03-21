@@ -603,20 +603,18 @@ fn run_system_command(command: &str, log_path: &Path) {
     }
 }
 
+fn _parse_uid_from_line(line: &str) -> u32 {
+    line.split(':').nth(2).unwrap().parse::<u32>().unwrap()
+}
+
 fn _get_uid() -> Result<u32, Box<dyn Error>> {
     let pwd_content = fs::read_to_string("/etc/passwd").expect("Unable to read /etc/passwd");
+
     let pwd_lines = pwd_content.lines().collect::<Vec<_>>();
-    match pwd_lines
-        .iter()
-        .find(|line| line.contains("/home") && !line.contains("nologin") && line.contains("/bin"))
-    {
-        Some(line) => {
-            let uid = line.split(':').nth(2).unwrap().parse::<u32>().unwrap();
-            match uid >= 1000 {
-                true => Ok(uid),
-                false => Err("User ID is less than 1000")?,
-            }
-        }
+    match pwd_lines.iter().find(|line| {
+        !line.contains("nologin") && line.contains("/bin") && _parse_uid_from_line(line) >= 1000
+    }) {
+        Some(line) => Ok(_parse_uid_from_line(line)),
         None => Err("Unable to find user in /etc/passwd")?,
     }
 }
