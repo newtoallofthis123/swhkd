@@ -56,24 +56,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     log::trace!("Logger initialized.");
 
-    let invoking_uid = nix::unistd::Uid::current().as_raw();
+    let user_uid = match get_uid() {
+        Ok(uid) => uid,
+        Err(e) => {
+            log::error!("Error: {}", e);
+            exit(1);
+        }
+    };
 
     let load_env = || {
-        perms::drop_privileges(invoking_uid);
+        perms::drop_privileges(user_uid);
         let temp_env = environ::Env::construct();
         log::trace!("Environment Aquired");
-        perms::raise_privileges();
         temp_env
     };
 
     let env = load_env();
+    perms::raise_privileges();
 
-    setup_swhkd(invoking_uid, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
+    setup_swhkd(user_uid, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
 
     let (sender, mut receiver) = mpsc::channel::<String>(20);
 
     tokio::spawn(async move {
-        perms::drop_privileges(invoking_uid);
+        perms::drop_privileges(user_uid);
         loop {
             match receiver.try_recv() {
                 Ok(cmd) => {
@@ -81,7 +87,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     run_system_command(&cmd, Path::new("/tmp/swhkd.log"));
                 }
                 Err(_) => {
-                    log::trace!("No command received.");
+                    // log::trace!("No command received.");
                 }
             }
         }
@@ -89,7 +95,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let load_config = || {
         // Drop privileges to the invoking user.
-        perms::drop_privileges(invoking_uid);
+        perms::drop_privileges(user_uid);
 
         let config_file_path: PathBuf = if args.is_present("config") {
             Path::new(args.value_of("config").unwrap()).to_path_buf()
@@ -603,18 +609,18 @@ fn run_system_command(command: &str, log_path: &Path) {
     }
 }
 
-fn _parse_uid_from_line(line: &str) -> u32 {
+fn parse_uid_from_line(line: &str) -> u32 {
     line.split(':').nth(2).unwrap().parse::<u32>().unwrap()
 }
 
-fn _get_uid() -> Result<u32, Box<dyn Error>> {
+fn get_uid() -> Result<u32, Box<dyn Error>> {
     let pwd_content = fs::read_to_string("/etc/passwd").expect("Unable to read /etc/passwd");
 
     let pwd_lines = pwd_content.lines().collect::<Vec<_>>();
     match pwd_lines.iter().find(|line| {
-        !line.contains("nologin") && line.contains("/bin") && _parse_uid_from_line(line) >= 1000
+        !line.contains("nologin") && line.contains("/bin") && parse_uid_from_line(line) >= 1000
     }) {
-        Some(line) => Ok(_parse_uid_from_line(line)),
+        Some(line) => Ok(parse_uid_from_line(line)),
         None => Err("Unable to find user in /etc/passwd")?,
     }
 }
