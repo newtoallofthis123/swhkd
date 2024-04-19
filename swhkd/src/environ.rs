@@ -3,6 +3,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::perms;
+
+#[derive(Debug)]
 pub struct Env {
     pub exec_id: u32,
     pub xdg_config_home: PathBuf,
@@ -24,24 +27,11 @@ pub enum EnvError {
 }
 
 impl Env {
-    pub fn construct() -> Self {
-        // let pkexec_id = match Self::get_env("PKEXEC_UID") {
-        //     Ok(val) => match val.parse::<u32>() {
-        //         Ok(val) => val,
-        //         Err(_) => {
-        //             log::error!("Failed to launch swhkd!!!");
-        //             log::error!("Make sure to launch the binary with pkexec.");
-        //             std::process::exit(1);
-        //         }
-        //     },
-        //     Err(_) => {
-        //         log::error!("Failed to launch swhkd!!!");
-        //         log::error!("Make sure to launch the binary with pkexec.");
-        //         std::process::exit(1);
-        //     }
-        // };
-
+    pub fn load(user_id: &u32) -> Self {
         let exec_id = nix::unistd::Uid::current().as_raw();
+
+        perms::drop_privileges(*user_id);
+        println!("Current user id: {}", nix::unistd::Uid::current());
 
         let home = match Self::get_env("HOME") {
             Ok(val) => PathBuf::from(val),

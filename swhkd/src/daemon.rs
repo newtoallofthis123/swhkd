@@ -64,19 +64,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let load_env = || {
-        perms::drop_privileges(user_uid);
-        let temp_env = environ::Env::construct();
-        log::trace!("Environment Aquired");
-        temp_env
-    };
+    let env = environ::Env::load(&user_uid);
+    println!("{}, {:#?}", user_uid, env);
+    log::trace!("Environment Aquired");
+    //UNDO perms::raise_privileges();
 
-    let env = load_env();
-    perms::raise_privileges();
+    exit(0);
 
     setup_swhkd(user_uid, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
 
-    let (sender, mut receiver) = mpsc::channel::<String>(20);
+    let (sender, mut receiver) = mpsc::channel::<String>(100);
 
     tokio::spawn(async move {
         perms::drop_privileges(user_uid);
