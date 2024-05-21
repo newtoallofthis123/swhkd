@@ -12,12 +12,11 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     error::Error,
-    fs,
-    fs::Permissions,
+    fs::{self, OpenOptions, Permissions},
     io::prelude::*,
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::{exit, id},
+    process::{exit, id, Stdio},
 };
 use sysinfo::{ProcessExt, System, SystemExt};
 use tokio::select;
@@ -538,4 +537,69 @@ pub fn send_command(
         log::error!("Please make sure that swhks is running.");
         log::error!("Err: {:#?}", e)
     };
+}
+
+/// Run a system command and log the output to a file.
+/// This holds the current ported functionality of swhks.
+/// Which can be called to run a system command.
+struct RunCommand {
+    log_path: PathBuf,
+}
+
+impl RunCommand {
+    fn new(log_path: PathBuf) -> Self {
+        RunCommand { log_path }
+    }
+
+    fn run_system_command(&self, command: &str) {
+        let log_path = &self.log_path;
+        if let Err(e) = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(match OpenOptions::new().append(true).create(true).open(log_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    _ = std::process::Command::new("notify-send")
+                        .arg(format!("ERROR {}", e))
+                        .spawn();
+                    exit(1);
+                }
+            })
+            .stderr(match OpenOptions::new().append(true).create(true).open(log_path) {
+                Ok(file) => file,
+                Err(e) => {
+                    _ = std::process::Command::new("notify-send")
+                        .arg(format!("ERROR {}", e))
+                        .spawn();
+                    exit(1);
+                }
+            })
+            .spawn()
+        {
+            log::error!("Failed to execute {}", command);
+            log::error!("Error: {}", e);
+        }
+    }
+}
+
+/// Parse the UID from a line in /etc/passwd
+fn parse_uid_from_line(line: &str) -> u32 {
+    line.split(':').nth(2).unwrap().parse::<u32>().unwrap()
+}
+
+/// Get the UID of the user that is not a system user
+/// and has a shell in /etc/passwd
+/// A normal user's UID is usually greater than 1000
+/// so we use that as a threshold
+fn get_uid() -> Result<u32, Box<dyn Error>> {
+    let pwd_content = fs::read_to_string("/etc/passwd").expect("Unable to read /etc/passwd");
+
+    let pwd_lines = pwd_content.lines().collect::<Vec<_>>();
+    match pwd_lines.iter().find(|line| {
+        !line.contains("nologin") && line.contains("/bin") && parse_uid_from_line(line) >= 1000
+    }) {
+        Some(line) => Ok(parse_uid_from_line(line)),
+        None => Err("Unable to find user in /etc/passwd")?,
+    }
 }
