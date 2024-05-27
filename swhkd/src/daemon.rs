@@ -78,16 +78,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     log::trace!("Logger initialized.");
 
-    let env = environ::Env::construct();
+    let user_id = match get_uid() {
+        Ok(uid) => uid,
+        Err(e) => {
+            log::error!("Error: {}", e);
+            exit(1);
+        }
+    };
+
+    let env = environ::Env::construct(user_id);
     log::trace!("Environment Aquired");
 
-    let invoking_uid = env.pkexec_id;
+    println!("Env: {:#?}", env);
+    println!("User ID: {}", user_id);
 
-    setup_swhkd(invoking_uid, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
+    exit(0);
+
+    setup_swhkd(user_id, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
 
     let load_config = || {
         // Drop privileges to the invoking user.
-        perms::drop_privileges(invoking_uid);
+        perms::drop_privileges(user_id);
 
         let config_file_path: PathBuf =
             args.config.as_ref().map_or_else(|| env.fetch_xdg_config_path(), |file| file.clone());
@@ -588,6 +599,13 @@ fn parse_uid_from_line(line: &str) -> u32 {
     line.split(':').nth(2).unwrap().parse::<u32>().unwrap()
 }
 
+fn parse_from_login() -> Result<u32, std::num::ParseIntError> {
+    let pid = std::process::id();
+    let status_path = format!("/proc/{}/loginuid", pid);
+    let status = fs::read_to_string(status_path).expect("Unable to read /proc/<pid>/loginuid");
+    status.trim().parse::<u32>()
+}
+
 /// Get the UID of the user that is not a system user
 /// and has a shell in /etc/passwd
 /// A normal user's UID is usually greater than 1000
@@ -596,10 +614,14 @@ fn get_uid() -> Result<u32, Box<dyn Error>> {
     let pwd_content = fs::read_to_string("/etc/passwd").expect("Unable to read /etc/passwd");
 
     let pwd_lines = pwd_content.lines().collect::<Vec<_>>();
-    match pwd_lines.iter().find(|line| {
-        !line.contains("nologin") && line.contains("/bin") && parse_uid_from_line(line) >= 1000
-    }) {
+    match pwd_lines
+        .iter()
+        .find(|line| !line.contains("nologin") && parse_uid_from_line(line) >= 1000)
+    {
         Some(line) => Ok(parse_uid_from_line(line)),
-        None => Err("Unable to find user in /etc/passwd")?,
+        None => match parse_from_login() {
+            Ok(uid) => Ok(uid),
+            Err(e) => Err(Box::new(e)),
+        },
     }
 }
