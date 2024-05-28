@@ -4,7 +4,7 @@ use config::Hotkey;
 use evdev::{AttributeSet, Device, InputEventKind, Key};
 use nix::{
     sys::stat::{umask, Mode},
-    unistd::{Group, Uid},
+    unistd::{fork, setuid, ForkResult, Group, Uid},
 };
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
@@ -16,7 +16,7 @@ use std::{
     io::prelude::*,
     os::unix::{fs::PermissionsExt, net::UnixStream},
     path::{Path, PathBuf},
-    process::{exit, id, Stdio},
+    process::{exit, id, Command, Stdio},
 };
 use sysinfo::{ProcessExt, System, SystemExt};
 use tokio::select;
@@ -86,13 +86,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
+    // perms::drop_privileges(user_id);
     let env = environ::Env::construct(user_id);
     log::trace!("Environment Aquired");
+
+    match unsafe { fork() } {
+        Ok(ForkResult::Parent { child, .. }) => {
+            println!("Spawned a child process with PID: {}", child);
+        }
+        Ok(ForkResult::Child) => {
+            if setuid(Uid::from_raw(user_id)).is_err() {
+                eprintln!("Failed to set UID.");
+                std::process::exit(1);
+            }
+
+            println!("Pid: {}", std::process::id());
+            let handle = std::thread::spawn(move || {
+                println!("This is the child thread running with UID: {}", Uid::effective());
+                let output =
+                    Command::new("sh").arg("-c").arg("gnome-text-editor").output().expect("Failed to execute command");
+                let output = String::from_utf8_lossy(&output.stdout);
+                println!("Child process environment: {}", output);
+            });
+
+            handle.join().unwrap();
+        }
+        Err(_) => {
+            eprintln!("Fork failed.");
+            std::process::exit(1);
+        }
+    }
 
     println!("Env: {:#?}", env);
     println!("User ID: {}", user_id);
 
-    exit(0);
+    // This doesn't work
+    // std::thread::spawn(move || {
+    //     perms::drop_privileges(user_id);
+    //     let child = Command::new("sh")
+    //         .arg("-c")
+    //         .arg("gnome-text-editor")
+    //         // .uid(1000)
+    //         .spawn()
+    //         .expect("Failed to execute command");
+    //     println!("Child PID: {}", child.id());
+    // }).join().unwrap();
+
+    // press enter to continue
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+
+    // exit(0);
 
     setup_swhkd(user_id, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
 
