@@ -50,3 +50,34 @@ fn set_euid(uid: u32) {
         }
     }
 }
+
+fn set_gid(gid: u32) {
+    let gid = Gid::from_raw(gid);
+    match nix::unistd::setgid(gid) {
+        Ok(_) => log::debug!("Setting GID..."),
+        Err(e) => {
+            log::error!("Failed to set GID: {:#?}", e);
+            exit(1);
+        }
+    }
+}
+
+fn set_uid(uid: u32) {
+    let uid = Uid::from_raw(uid);
+    match nix::unistd::setuid(uid) {
+        Ok(_) => log::debug!("Setting UID..."),
+        Err(e) => {
+            log::error!("Failed to set UID: {:#?}", e);
+            exit(1);
+        }
+    }
+}
+
+pub fn drop_privileges_thread(user_uid: u32) {
+    let user_uid = Uid::from_raw(user_uid);
+    let user = User::from_uid(user_uid).unwrap().unwrap();
+
+    set_initgroups(&user, user_uid.as_raw());
+    set_gid(user_uid.as_raw());
+    set_uid(user_uid.as_raw());
+}

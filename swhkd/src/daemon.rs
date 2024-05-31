@@ -90,47 +90,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let env = environ::Env::construct(user_id);
     log::trace!("Environment Aquired");
 
-    match unsafe { fork() } {
-        Ok(ForkResult::Parent { child, .. }) => {
-            println!("Spawned a child process with PID: {}", child);
-        }
-        Ok(ForkResult::Child) => {
-            if setuid(Uid::from_raw(user_id)).is_err() {
-                eprintln!("Failed to set UID.");
-                std::process::exit(1);
-            }
-
-            println!("Pid: {}", std::process::id());
-            let handle = std::thread::spawn(move || {
-                println!("This is the child thread running with UID: {}", Uid::effective());
-                let output =
-                    Command::new("sh").arg("-c").arg("gnome-text-editor").output().expect("Failed to execute command");
-                let output = String::from_utf8_lossy(&output.stdout);
-                println!("Child process environment: {}", output);
-            });
-
-            handle.join().unwrap();
-        }
-        Err(_) => {
-            eprintln!("Fork failed.");
-            std::process::exit(1);
-        }
-    }
+    // match unsafe { fork() } {
+    //     Ok(ForkResult::Parent { child, .. }) => {
+    //         println!("Spawned a child process with PID: {}", child);
+    //     }
+    //     Ok(ForkResult::Child) => {
+    //         if setuid(Uid::from_raw(user_id)).is_err() {
+    //             eprintln!("Failed to set UID.");
+    //             std::process::exit(1);
+    //         }
+    //
+    //         println!("Pid: {}", std::process::id());
+    //         let handle = std::thread::spawn(move || {
+    //             println!("This is the child thread running with UID: {}", Uid::effective());
+    //             let output =
+    //                 Command::new("sh").arg("-c").arg("gnome-text-editor").output().expect("Failed to execute command");
+    //             let output = String::from_utf8_lossy(&output.stdout);
+    //             println!("Child process environment: {}", output);
+    //         });
+    //
+    //         handle.join().unwrap();
+    //     }
+    //     Err(_) => {
+    //         eprintln!("Fork failed.");
+    //         std::process::exit(1);
+    //     }
+    // }
 
     println!("Env: {:#?}", env);
     println!("User ID: {}", user_id);
 
     // This doesn't work
-    // std::thread::spawn(move || {
-    //     perms::drop_privileges(user_id);
-    //     let child = Command::new("sh")
-    //         .arg("-c")
-    //         .arg("gnome-text-editor")
-    //         // .uid(1000)
-    //         .spawn()
-    //         .expect("Failed to execute command");
-    //     println!("Child PID: {}", child.id());
-    // }).join().unwrap();
+    tokio::spawn(async move {
+        perms::drop_privileges_thread(user_id);
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("HOME=/home/noobscience kitty")
+            .spawn()
+            .expect("Failed to execute command");
+        println!("Child PID: {}", child.id());
+    })
+    .await
+    .unwrap();
 
     // press enter to continue
     let mut input = String::new();
@@ -638,34 +639,9 @@ impl RunCommand {
     }
 }
 
-/// Parse the UID from a line in /etc/passwd
-fn parse_uid_from_line(line: &str) -> u32 {
-    line.split(':').nth(2).unwrap().parse::<u32>().unwrap()
-}
-
-fn parse_from_login() -> Result<u32, std::num::ParseIntError> {
-    let pid = std::process::id();
-    let status_path = format!("/proc/{}/loginuid", pid);
-    let status = fs::read_to_string(status_path).expect("Unable to read /proc/<pid>/loginuid");
-    status.trim().parse::<u32>()
-}
-
 /// Get the UID of the user that is not a system user
-/// and has a shell in /etc/passwd
-/// A normal user's UID is usually greater than 1000
-/// so we use that as a threshold
 fn get_uid() -> Result<u32, Box<dyn Error>> {
-    let pwd_content = fs::read_to_string("/etc/passwd").expect("Unable to read /etc/passwd");
-
-    let pwd_lines = pwd_content.lines().collect::<Vec<_>>();
-    match pwd_lines
-        .iter()
-        .find(|line| !line.contains("nologin") && parse_uid_from_line(line) >= 1000)
-    {
-        Some(line) => Ok(parse_uid_from_line(line)),
-        None => match parse_from_login() {
-            Ok(uid) => Ok(uid),
-            Err(e) => Err(Box::new(e)),
-        },
-    }
+    let status_content = fs::read_to_string(format!("/proc/{}/loginuid", std::process::id()))?;
+    let uid = status_content.trim().parse::<u32>()?;
+    Ok(uid)
 }
