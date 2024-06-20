@@ -7,10 +7,12 @@ use nix::unistd;
 
 // The main struct for handling environment variables.
 // Contains the values of the environment variables in the form of PathBuffers.
+#[derive(Debug)]
 pub struct Env {
     pub data_home: PathBuf,
     pub home: PathBuf,
     pub runtime_dir: PathBuf,
+    pub config_dir: PathBuf,
 }
 
 /// Error type for the Env struct.
@@ -20,6 +22,7 @@ pub enum EnvError {
     DataHomeNotSet,
     HomeNotSet,
     RuntimeDirNotSet,
+    ConfigDirNotSet,
     PathNotFound,
     GenericError(String),
 }
@@ -62,7 +65,20 @@ impl Env {
             },
         };
 
-        Self { data_home, home, runtime_dir }
+        let config_dir = match Self::get_env("XDG_CONFIG_HOME") {
+            Ok(val) => val,
+            Err(e) => match e {
+                EnvError::ConfigDirNotSet | EnvError::PathNotFound => {
+                    log::warn!(
+                        "XDG_CONFIG_HOME Variable is not set, falling back on hardcoded path."
+                    );
+                    home.join(".config")
+                }
+                _ => panic!("Unexpected error: {:#?}", e),
+            },
+        };
+
+        Self { data_home, home, runtime_dir, config_dir }
     }
 
     /// Actual interface to get the environment variable.
@@ -77,6 +93,7 @@ impl Env {
                     "XDG_DATA_HOME" => Err(EnvError::DataHomeNotSet),
                     "HOME" => Err(EnvError::HomeNotSet),
                     "XDG_RUNTIME_DIR" => Err(EnvError::RuntimeDirNotSet),
+                    "XDG_CONFIG_HOME" => Err(EnvError::ConfigDirNotSet),
                     _ => Err(EnvError::GenericError(format!("{} not set", name))),
                 },
                 VarError::NotUnicode(_) => {

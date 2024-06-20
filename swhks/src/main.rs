@@ -4,7 +4,6 @@ use nix::{
     sys::stat::{umask, Mode},
     unistd::daemon,
 };
-use std::io::Read;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     env, fs,
@@ -12,6 +11,10 @@ use std::{
     os::unix::net::UnixListener,
     path::{Path, PathBuf},
     process::{exit, id, Command, Stdio},
+};
+use std::{
+    io::{Read, Write},
+    os::unix::net::UnixStream,
 };
 use sysinfo::{ProcessExt, System, SystemExt};
 
@@ -45,6 +48,11 @@ fn main() -> std::io::Result<()> {
 
     // This is used to initialize the environment variables only once
     let environment = environ::Env::construct();
+
+    println!("{:#?}", environment);
+
+    // let mut input = String::new();
+    // std::io::stdin().read_line(&mut input).unwrap();
 
     let (pid_file_path, sock_file_path) = get_file_paths(&environment);
 
@@ -115,17 +123,45 @@ fn main() -> std::io::Result<()> {
     }
 
     let listener = UnixListener::bind(sock_file_path)?;
-    loop {
-        match listener.accept() {
-            Ok((mut socket, address)) => {
-                let mut response = String::new();
-                socket.read_to_string(&mut response)?;
-                run_system_command(&response, log_path);
-                log::debug!("Socket: {:?} Address: {:?} Response: {}", socket, address, response);
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                log::info!("New client!");
+                handle_client(stream, &environment)?;
             }
-            Err(e) => log::error!("accept function failed: {:?}", e),
+            Err(e) => {
+                log::error!("Error accepting connection: {:?}", e);
+                break;
+            }
         }
     }
+
+    Ok(())
+}
+
+fn handle_client(mut socket: UnixStream, environment: &environ::Env) -> std::io::Result<()> {
+    // let response = match env_query.as_str() {
+    //     "home" => environment.home.to_string_lossy().to_string(),
+    //     "data_home" => environment.data_home.to_string_lossy().to_string(),
+    //     "runtime_dir" => environment.runtime_dir.to_string_lossy().to_string(),
+    //     "config_dir" => environment.config_dir.to_string_lossy().to_string(),
+    //     _ => "None".to_string(),
+    // };
+
+    // let env = format!(
+    //     "{}|{}|{}|{}",
+    //     environment.home.to_string_lossy(),
+    //     environment.data_home.to_string_lossy(),
+    //     environment.runtime_dir.to_string_lossy(),
+    //     environment.config_dir.to_string_lossy()
+    // );
+
+    let env = String::from_utf8(Command::new("env").output()?.stdout).unwrap();
+
+    socket.write_all(env.as_bytes())?;
+    socket.flush()?;
+
+    Ok(())
 }
 
 fn get_file_paths(env: &Env) -> (String, String) {

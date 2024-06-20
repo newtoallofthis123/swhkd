@@ -18,7 +18,7 @@ pub fn raise_privileges() {
     set_initgroups(&root_user, 0);
 }
 
-fn set_initgroups(user: &nix::unistd::User, gid: u32) {
+pub fn set_initgroups(user: &nix::unistd::User, gid: u32) {
     let gid = Gid::from_raw(gid);
     match nix::unistd::initgroups(&user.gecos, gid) {
         Ok(_) => log::debug!("Setting initgroups..."),

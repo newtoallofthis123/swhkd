@@ -4,7 +4,7 @@ use config::Hotkey;
 use evdev::{AttributeSet, Device, InputEventKind, Key};
 use nix::{
     sys::stat::{umask, Mode},
-    unistd::{fork, setuid, ForkResult, Group, Uid},
+    unistd::{Gid, Group, Uid, User},
 };
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
@@ -87,9 +87,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // perms::drop_privileges(user_id);
-    let env = environ::Env::construct(user_id);
-    log::trace!("Environment Aquired");
-
+    // let (mut env_send, env_rev) = mpsc::channel::<String>();
+    //
+    // log::trace!("Environment Aquired");
+    //
     // match unsafe { fork() } {
     //     Ok(ForkResult::Parent { child, .. }) => {
     //         println!("Spawned a child process with PID: {}", child);
@@ -99,35 +100,62 @@ async fn main() -> Result<(), Box<dyn Error>> {
     //             eprintln!("Failed to set UID.");
     //             std::process::exit(1);
     //         }
+    //         let command = Command::new("env").output().expect("Failed to execute command");
+    //         let env = String::from_utf8(command.stdout).unwrap();
+    //         env_send.send(env).unwrap();
     //
     //         println!("Pid: {}", std::process::id());
-    //         let handle = std::thread::spawn(move || {
-    //             println!("This is the child thread running with UID: {}", Uid::effective());
-    //             let output =
-    //                 Command::new("sh").arg("-c").arg("gnome-text-editor").output().expect("Failed to execute command");
-    //             let output = String::from_utf8_lossy(&output.stdout);
-    //             println!("Child process environment: {}", output);
-    //         });
-    //
-    //         handle.join().unwrap();
     //     }
     //     Err(_) => {
     //         eprintln!("Fork failed.");
     //         std::process::exit(1);
     //     }
     // }
+    //
+    // let env = env_rev.recv().unwrap();
+    // println!("{:#?}", env);
 
-    println!("Env: {:#?}", env);
-    println!("User ID: {}", user_id);
+    let mut env = environ::Env::new();
+    env.construct(user_id);
+
+    println!("{:#?}", env);
+
+    let res = socket_write("home", env.fetch_xdg_runtime_socket_path());
+    println!("{:#?}", res);
+
+    let mut envs: HashMap<String, String> = HashMap::new();
+    res.unwrap().lines().for_each(|line| {
+        let mut split = line.split('=');
+        let key = split.next().unwrap();
+        let value = split.next().unwrap();
+        envs.insert(key.to_string(), value.to_string());
+    });
+
+    println!("{:#?}", envs);
+
+    // diff:
+    // environ -> thread inherits from the parent process
+    // actual process has different groups 4 6 24 27 30 46 100 114 129 993 995 1000 64055
+    // ours has only one.
 
     // This doesn't work
     tokio::spawn(async move {
+        let user = User::from_uid(Uid::from_raw(user_id)).unwrap().unwrap();
+        let process_groups =
+            nix::unistd::getgrouplist(&user.gecos, Gid::from_raw(user_id)).unwrap();
+        for group in process_groups.iter() {
+            perms::set_initgroups(&user, group.as_raw());
+        }
+
         perms::drop_privileges_thread(user_id);
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg("HOME=/home/noobscience kitty")
-            .spawn()
-            .expect("Failed to execute command");
+        let mut child = Command::new("sh");
+        child.env_clear();
+        child.envs(&envs);
+
+        child.arg("-c").arg("kitty");
+
+        let child = child.spawn().unwrap();
+
         println!("Child PID: {}", child.id());
     })
     .await
@@ -450,10 +478,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 }
 
-fn socket_write(command: &str, socket_path: PathBuf) -> Result<(), Box<dyn Error>> {
+fn socket_write(command: &str, socket_path: PathBuf) -> Result<String, Box<dyn Error>> {
     let mut stream = UnixStream::connect(socket_path)?;
-    stream.write_all(command.as_bytes())?;
-    Ok(())
+    let mut response = String::new();
+    stream.read_to_string(&mut response)?;
+    Ok(response)
 }
 
 pub fn check_input_group() -> Result<(), Box<dyn Error>> {
