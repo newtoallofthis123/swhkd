@@ -3,8 +3,11 @@ use clap::Parser;
 use config::Hotkey;
 use evdev::{AttributeSet, Device, InputEventKind, Key};
 use nix::{
-    sys::stat::{umask, Mode},
-    unistd::{Gid, Group, Uid, User},
+    sys::{
+        stat::{umask, Mode},
+        wait::waitpid,
+    },
+    unistd::{fork, setgid, setuid, ForkResult, Gid, Group, Uid},
 };
 use signal_hook::consts::signal::*;
 use signal_hook_tokio::Signals;
@@ -12,9 +15,8 @@ use std::{
     collections::{HashMap, HashSet},
     env,
     error::Error,
-    fs::{self, OpenOptions, Permissions},
-    io::prelude::*,
-    os::unix::{fs::PermissionsExt, net::UnixStream},
+    fs::{self, Permissions},
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::{exit, id, Command, Stdio},
 };
@@ -78,6 +80,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     log::trace!("Logger initialized.");
 
+    // perms::raise_privileges();
+
     let user_id = match get_uid() {
         Ok(uid) => uid,
         Err(e) => {
@@ -86,82 +90,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    // perms::drop_privileges(user_id);
-    // let (mut env_send, env_rev) = mpsc::channel::<String>();
-    //
-    // log::trace!("Environment Aquired");
-    //
+    log::trace!("Environment Acquired");
+
+    let uname = match get_uname_from_uid(user_id) {
+        Ok(uname) => uname,
+        Err(e) => {
+            log::error!("Error: {}", e);
+            exit(1);
+        }
+    };
+
     // match unsafe { fork() } {
-    //     Ok(ForkResult::Parent { child, .. }) => {
-    //         println!("Spawned a child process with PID: {}", child);
+    //     Ok(ForkResult::Parent { child }) => {
+    //         // Parent process
+    //         println!("Parent process: waiting for child");
+    //         waitpid(child, None)?;
+    //         println!("Child process finished");
     //     }
     //     Ok(ForkResult::Child) => {
-    //         if setuid(Uid::from_raw(user_id)).is_err() {
-    //             eprintln!("Failed to set UID.");
-    //             std::process::exit(1);
-    //         }
-    //         let command = Command::new("env").output().expect("Failed to execute command");
-    //         let env = String::from_utf8(command.stdout).unwrap();
-    //         env_send.send(env).unwrap();
+    //         println!("Child process: running 'env' command");
     //
-    //         println!("Pid: {}", std::process::id());
+    //         let output = Command::new("su")
+    //             .arg(uname.clone())
+    //             .arg("-c")
+    //             .arg("-l")
+    //             .arg("env")
+    //             .arg(uname.clone())
+    //             .stdout(Stdio::piped())
+    //             .output()?;
+    //         // let output =
+    //         //     Command::new("bash").arg("-c").arg("env").stdout(Stdio::piped()).output()?;
+    //
+    //         let env_output = String::from_utf8_lossy(&output.stdout);
+    //         println!("Environment variables:\n{}", env_output);
+    //
+    //         std::process::exit(0);
     //     }
-    //     Err(_) => {
-    //         eprintln!("Fork failed.");
+    //     Err(err) => {
+    //         eprintln!("Fork failed: {}", err);
     //         std::process::exit(1);
     //     }
     // }
-    //
-    // let env = env_rev.recv().unwrap();
-    // println!("{:#?}", env);
 
     let mut env = environ::Env::new();
     env.construct(user_id);
 
-    println!("{:#?}", env);
+    let out = Command::new("su")
+        .arg(uname.clone())
+        .arg("-c")
+        .arg("-l")
+        .arg("env")
+        .arg(uname.clone())
+        .stdout(Stdio::piped())
+        .output()
+        .unwrap();
+    let env_out = String::from_utf8(out.stdout).unwrap();
+    println!("{}", env_out);
 
-    let res = socket_write("home", env.fetch_xdg_runtime_socket_path());
-    println!("{:#?}", res);
-
-    let mut envs: HashMap<String, String> = HashMap::new();
-    res.unwrap().lines().for_each(|line| {
-        let mut split = line.split('=');
-        let key = split.next().unwrap();
-        let value = split.next().unwrap();
-        envs.insert(key.to_string(), value.to_string());
-    });
-
-    println!("{:#?}", envs);
-
-    // diff:
-    // environ -> thread inherits from the parent process
-    // actual process has different groups 4 6 24 27 30 46 100 114 129 993 995 1000 64055
-    // ours has only one.
-
-    // This doesn't work
-    tokio::spawn(async move {
-        let user = User::from_uid(Uid::from_raw(user_id)).unwrap().unwrap();
-        let process_groups =
-            nix::unistd::getgrouplist(&user.gecos, Gid::from_raw(user_id)).unwrap();
-        for group in process_groups.iter() {
-            perms::set_initgroups(&user, group.as_raw());
-        }
-
-        perms::drop_privileges_thread(user_id);
-        let mut child = Command::new("sh");
-        child.env_clear();
-        child.envs(&envs);
-
-        child.arg("-c").arg("kitty");
-
-        let child = child.spawn().unwrap();
-
-        println!("Child PID: {}", child.id());
-    })
-    .await
-    .unwrap();
-
-    // press enter to continue
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();
 
@@ -170,9 +155,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     setup_swhkd(user_id, env.xdg_runtime_dir.clone().to_string_lossy().to_string());
 
     let load_config = || {
-        // Drop privileges to the invoking user.
-        perms::drop_privileges(user_id);
-
         let config_file_path: PathBuf =
             args.config.as_ref().map_or_else(|| env.fetch_xdg_config_path(), |file| file.clone());
 
@@ -183,11 +165,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 log::error!("Config Error: {}", e);
                 exit(1)
             }
-            Ok(out) => {
-                // Escalate back to the root user after reading the config file.
-                perms::raise_privileges();
-                out
-            }
+            Ok(out) => out,
         }
     };
 
@@ -250,8 +228,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let repeat_cooldown_duration: u64 = args.cooldown.unwrap_or(default_cooldown);
 
     let mut signals = Signals::new([
-        SIGUSR1, SIGUSR2, SIGHUP, SIGABRT, SIGBUS, SIGCHLD, SIGCONT, SIGINT, SIGPIPE, SIGQUIT,
-        SIGSYS, SIGTERM, SIGTRAP, SIGTSTP, SIGVTALRM, SIGXCPU, SIGXFSZ,
+        SIGUSR1, SIGUSR2, SIGHUP, SIGABRT, SIGBUS, SIGCONT, SIGINT, SIGPIPE, SIGQUIT, SIGSYS,
+        SIGTERM, SIGTRAP, SIGTSTP, SIGVTALRM, SIGXCPU, SIGXFSZ,
     ])?;
 
     let mut execution_is_paused = false;
@@ -277,7 +255,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::pin!(hotkey_repeat_timer);
 
     // The socket we're sending the commands to.
-    let socket_file_path = env.fetch_xdg_runtime_socket_path();
+    // let socket_file_path = env.fetch_xdg_runtime_socket_path();
     loop {
         select! {
             _ = &mut hotkey_repeat_timer, if &last_hotkey.is_some() => {
@@ -285,7 +263,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if hotkey.keybinding.on_release {
                     continue;
                 }
-                send_command(hotkey.clone(), &socket_file_path, &modes, &mut mode_stack);
+                send_command(hotkey.clone(), &uname, &modes, &mut mode_stack);
                 hotkey_repeat_timer.as_mut().reset(Instant::now() + Duration::from_millis(repeat_cooldown_duration));
             }
 
@@ -405,7 +383,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     0 => {
                         if last_hotkey.is_some() && pending_release {
                             pending_release = false;
-                            send_command(last_hotkey.clone().unwrap(), &socket_file_path, &modes, &mut mode_stack);
+                            send_command(last_hotkey.clone().unwrap(), &uname, &modes, &mut mode_stack);
                             last_hotkey = None;
                         }
                         if let Some(modifier) = modifiers_map.get(&key) {
@@ -468,7 +446,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             pending_release = true;
                             break;
                         }
-                        send_command(hotkey.clone(), &socket_file_path, &modes, &mut mode_stack);
+                        send_command(hotkey.clone(), &uname, &modes, &mut mode_stack);
                         hotkey_repeat_timer.as_mut().reset(Instant::now() + Duration::from_millis(repeat_cooldown_duration));
                         continue;
                     }
@@ -476,13 +454,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
-}
-
-fn socket_write(command: &str, socket_path: PathBuf) -> Result<String, Box<dyn Error>> {
-    let mut stream = UnixStream::connect(socket_path)?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    Ok(response)
 }
 
 pub fn check_input_group() -> Result<(), Box<dyn Error>> {
@@ -538,7 +509,7 @@ pub fn setup_swhkd(invoking_uid: u32, runtime_path: String) {
     }
 
     // Get the PID file path for instance tracking.
-    let pidfile: String = format!("{}swhkd_{}.pid", runtime_path, invoking_uid);
+    let pidfile: String = format!("{}/swhkd_{}.pid", runtime_path, invoking_uid);
     if Path::new(&pidfile).exists() {
         log::trace!("Reading {} file and checking for running instances.", pidfile);
         let swhkd_pid = match fs::read_to_string(&pidfile) {
@@ -573,14 +544,14 @@ pub fn setup_swhkd(invoking_uid: u32, runtime_path: String) {
     }
 
     // Check if the user is in input group.
-    if check_input_group().is_err() {
-        exit(1);
-    }
+    // if check_input_group().is_err() {
+    //     exit(1);
+    // }
 }
 
 pub fn send_command(
     hotkey: Hotkey,
-    socket_path: &Path,
+    uname: &str,
     modes: &[config::Mode],
     mode_stack: &mut Vec<usize>,
 ) {
@@ -617,54 +588,18 @@ pub fn send_command(
     if commands_to_send.ends_with(" &&") {
         commands_to_send = commands_to_send.strip_suffix(" &&").unwrap().to_string();
     }
-    if let Err(e) = socket_write(&commands_to_send, socket_path.to_path_buf()) {
-        log::error!("Failed to send command to swhks through IPC.");
-        log::error!("Please make sure that swhks is running.");
-        log::error!("Err: {:#?}", e)
-    };
-}
+    // if let Err(e) = socket_write(&commands_to_send, socket_path.to_path_buf()) {
+    //     log::error!("Failed to send command to swhks through IPC.");
+    //     log::error!("Please make sure that swhks is running.");
+    //     log::error!("Err: {:#?}", e)
+    // };
+    let mut child = Command::new("su");
+    child.arg(uname);
+    child.arg("-c");
+    child.arg(commands_to_send);
 
-/// Run a system command and log the output to a file.
-/// This holds the current ported functionality of swhks.
-/// Which can be called to run a system command.
-struct RunCommand {
-    log_path: PathBuf,
-}
-
-impl RunCommand {
-    fn new(log_path: PathBuf) -> Self {
-        RunCommand { log_path }
-    }
-
-    fn run_system_command(&self, command: &str) {
-        let log_path = &self.log_path;
-        if let Err(e) = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(match OpenOptions::new().append(true).create(true).open(log_path) {
-                Ok(file) => file,
-                Err(e) => {
-                    _ = std::process::Command::new("notify-send")
-                        .arg(format!("ERROR {}", e))
-                        .spawn();
-                    exit(1);
-                }
-            })
-            .stderr(match OpenOptions::new().append(true).create(true).open(log_path) {
-                Ok(file) => file,
-                Err(e) => {
-                    _ = std::process::Command::new("notify-send")
-                        .arg(format!("ERROR {}", e))
-                        .spawn();
-                    exit(1);
-                }
-            })
-            .spawn()
-        {
-            log::error!("Failed to execute {}", command);
-            log::error!("Error: {}", e);
-        }
+    if let Err(e) = child.spawn() {
+        log::error!("Child error: {}", e);
     }
 }
 
@@ -673,4 +608,19 @@ fn get_uid() -> Result<u32, Box<dyn Error>> {
     let status_content = fs::read_to_string(format!("/proc/{}/loginuid", std::process::id()))?;
     let uid = status_content.trim().parse::<u32>()?;
     Ok(uid)
+}
+
+fn get_uname_from_uid(uid: u32) -> Result<String, Box<dyn Error>> {
+    let passwd = fs::read_to_string("/etc/passwd").unwrap();
+    let lines: Vec<&str> = passwd.split('\n').collect();
+    for line in lines {
+        let parts: Vec<&str> = line.split(':').collect();
+        if parts.len() > 2 {
+            let user_id = parts[2].parse::<u32>().unwrap();
+            if user_id == uid {
+                return Ok(parts[0].to_string());
+            }
+        }
+    }
+    Err("User not found".into())
 }

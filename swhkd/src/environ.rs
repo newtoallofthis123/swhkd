@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::{
     env::VarError,
     path::{Path, PathBuf},
@@ -8,6 +10,7 @@ pub struct Env {
     pub xdg_config_home: PathBuf,
     pub xdg_runtime_socket: PathBuf,
     pub xdg_runtime_dir: PathBuf,
+    external_env: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -24,24 +27,22 @@ impl Env {
             xdg_config_home: PathBuf::new(),
             xdg_runtime_socket: PathBuf::new(),
             xdg_runtime_dir: PathBuf::new(),
+            external_env: HashMap::new(),
         }
     }
 
-    pub fn construct(&mut self, user_id: u32){
-        let xdg_config_home = match Self::get_env("XDG_CONFIG_HOME") {
-            Ok(val) => match validate_path(&PathBuf::from(val)) {
-                Ok(val) => val,
-                Err(e) => match e {
-                    EnvError::PathNotFound => {
-                        log::warn!("XDG_CONFIG_HOME does not exist, using hardcoded /etc");
-                        PathBuf::from("/etc")
-                    }
-                    _ => {
-                        eprintln!("Failed to get XDG_CONFIG_HOME: {:?}", e);
-                        std::process::exit(1);
-                    }
-                },
-            },
+    pub fn construct(&mut self, user_id: u32) {
+        let xdg_config_home = match self.get_env("XDG_CONFIG_HOME") {
+            Ok(val) => validate_path(&PathBuf::from(val)).unwrap_or_else(|e| match e {
+                EnvError::PathNotFound => {
+                    log::warn!("XDG_CONFIG_HOME does not exist, using hardcoded /etc");
+                    PathBuf::from("/etc")
+                }
+                _ => {
+                    eprintln!("Failed to get XDG_CONFIG_HOME: {:?}", e);
+                    std::process::exit(1);
+                }
+            }),
             Err(e) => match e {
                 EnvError::XdgConfigNotFound => {
                     log::warn!("XDG_CONFIG_HOME not found, using hardcoded /etc");
@@ -54,13 +55,13 @@ impl Env {
             },
         };
 
-        let xdg_runtime_socket = match Self::get_env("XDG_RUNTIME_DIR") {
+        let xdg_runtime_socket = match self.get_env("XDG_RUNTIME_DIR") {
             Ok(val) => match validate_path(&PathBuf::from(val).join("swhkd.sock")) {
                 Ok(val) => val,
                 Err(e) => match e {
                     EnvError::PathNotFound => {
                         log::warn!("XDG_RUNTIME_DIR does not exist, using hardcoded /run/user");
-                        PathBuf::from(format!("/run/user/{}", user_id))
+                        PathBuf::from(format!("/run/user/{}/", user_id))
                     }
                     _ => {
                         eprintln!("Failed to get XDG_RUNTIME_DIR: {:?}", e);
@@ -71,7 +72,7 @@ impl Env {
             Err(e) => match e {
                 EnvError::XdgRuntimeNotFound => {
                     log::warn!("XDG_RUNTIME_DIR not found, using hardcoded /run/user");
-                    PathBuf::from(format!("/run/user/{}", user_id))
+                    PathBuf::from(format!("/run/user/{}/", user_id))
                 }
                 _ => {
                     eprintln!("Failed to get XDG_RUNTIME_DIR: {:?}", e);
@@ -80,12 +81,12 @@ impl Env {
             },
         };
 
-        let xdg_runtime_dir = match Self::get_env("XDG_RUNTIME_DIR") {
+        let xdg_runtime_dir = match self.get_env("XDG_RUNTIME_DIR") {
             Ok(val) => PathBuf::from(val),
             Err(e) => match e {
                 EnvError::XdgRuntimeNotFound => {
                     log::warn!("XDG_RUNTIME_DIR not found, using hardcoded /run/user");
-                    PathBuf::from(format!("/run/user/{}", user_id))
+                    PathBuf::from(format!("/run/user/{}/", user_id))
                 }
                 _ => {
                     eprintln!("Failed to get XDG_RUNTIME_DIR: {:?}", e);
@@ -99,7 +100,10 @@ impl Env {
         self.xdg_runtime_dir = xdg_runtime_dir;
     }
 
-    fn get_env(name: &str) -> Result<String, EnvError> {
+    fn get_env(&self, name: &str) -> Result<String, EnvError> {
+        if let Some(val) = self.external_env.get(name) {
+            return Ok(val.to_string());
+        }
         match std::env::var(name) {
             Ok(val) => Ok(val),
             Err(e) => match e {
@@ -113,6 +117,10 @@ impl Env {
                 }
             },
         }
+    }
+
+    pub fn set_external_env(&mut self, env: HashMap<String, String>) {
+        self.external_env = env;
     }
 
     pub fn fetch_xdg_config_path(&self) -> PathBuf {

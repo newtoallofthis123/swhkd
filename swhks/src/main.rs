@@ -12,10 +12,7 @@ use std::{
     path::{Path, PathBuf},
     process::{exit, id, Command, Stdio},
 };
-use std::{
-    io::{Read, Write},
-    os::unix::net::UnixStream,
-};
+use std::{io::Write, os::unix::net::UnixStream};
 use sysinfo::{ProcessExt, System, SystemExt};
 
 mod environ;
@@ -47,7 +44,7 @@ fn main() -> std::io::Result<()> {
     umask(Mode::S_IWGRP | Mode::S_IWOTH);
 
     // This is used to initialize the environment variables only once
-    let environment = environ::Env::construct();
+    let environment = Env::construct();
 
     println!("{:#?}", environment);
 
